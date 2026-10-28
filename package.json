@@ -1,0 +1,28 @@
+{
+  "name": "payledger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PayLedger — simulated full-stack payroll & contractor payment platform (portfolio project)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "db:start": "node scripts/start-pg.mjs",
+    "db:setup": "node scripts/setup-db.mjs",
+    "db:reset": "node scripts/setup-db.mjs --force",
+    "dev:api": "npm run start:dev --workspace apps/api",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "test": "npm run test --workspace apps/api",
+    "test:coverage": "npm run test:coverage --workspace apps/api",
+    "seed": "npm run seed --workspace apps/api",
+    "lint": "npm run lint --workspace apps/api"
+  },
+  "devDependencies": {
+    "embedded-postgres": "17.10.0-beta.17",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

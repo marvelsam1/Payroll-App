@@ -1,0 +1,481 @@
+// PayLedger data model — simulated payroll & contractor payment platform.
+// Money is stored as integer cents everywhere (no floats) to keep financial math exact.
+// Prisma 7: the client is generated as TypeScript source (WASM query compiler, pg driver
+// adapter) and connection URLs live in prisma.config.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  PLATFORM_ADMIN
+  COMPANY_ADMIN
+  HR_MANAGER
+  ACCOUNTANT
+  EMPLOYEE
+  CONTRACTOR
+}
+
+enum PayFrequency {
+  WEEKLY
+  BIWEEKLY
+  SEMIMONTHLY
+  MONTHLY
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  TEMPORARY
+}
+
+enum PayType {
+  SALARIED
+  HOURLY
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  TERMINATED
+}
+
+enum PayrollRunStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum InvoiceStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum ExpenseStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  REIMBURSED
+}
+
+enum ReimbursementMode {
+  DEFER_TO_PAYROLL
+  STANDALONE
+}
+
+enum TransferStatus {
+  INITIATED
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalSide {
+  DEBIT
+  CREDIT
+}
+
+enum DeductionKind {
+  PRE_TAX
+  POST_TAX
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy root
+// ---------------------------------------------------------------------------
+
+model Company {
+  id                 String       @id @default(uuid())
+  name               String
+  ein                String
+  paySchedule        PayFrequency @default(BIWEEKLY)
+  defaultState       String       @default("CA")
+  monthlyRevenueCents Int          @default(0)
+  chaosMode          Boolean      @default(false)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  users             User[]
+  employees         Employee[]
+  contractors       Contractor[]
+  departments       Department[]
+  payrollRuns       PayrollRun[]
+  invoices          ContractorInvoice[]
+  ledgerAccounts    LedgerAccount[]
+  ledgerTxns        LedgerTransaction[]
+  ledgerEntries     LedgerEntry[]
+  bankAccounts      CompanyBankAccount[]
+  transfers         BankTransfer[]
+  expenses          Expense[]
+  auditLogs         AuditLog[]
+
+  @@index([name])
+}
+
+model User {
+  id            String    @id @default(uuid())
+  companyId     String?
+  company       Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role          Role
+  email         String    @unique
+  passwordHash  String
+  name          String
+  createdAt     DateTime  @default(now())
+  lastLoginAt   DateTime?
+
+  employee          Employee?
+  contractor         Contractor?
+  createdRuns        PayrollRun[]      @relation("RunCreatedBy")
+  approvedRuns       PayrollRun[]      @relation("RunApprovedBy")
+  approvedExpenses   Expense[]         @relation("ExpenseApprovedBy")
+  submittedExpenses  Expense[]         @relation("ExpenseSubmittedBy")
+  approvedInvoices   ContractorInvoice[] @relation("InvoiceApprovedBy")
+  auditLogs          AuditLog[]
+}
+
+// ---------------------------------------------------------------------------
+// Workforce
+// ---------------------------------------------------------------------------
+
+model Employee {
+  id               String         @id @default(uuid())
+  companyId        String
+  company          Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId           String?        @unique
+  user             User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name             String
+  email            String?
+  ssnEncrypted     String
+  workState        String
+  residenceState   String
+  residenceCity    String? // enables local taxes (e.g. New York City)
+  filingStatus     String   @default("SINGLE") // IRS filing status for withholding
+  additionalFederalWithholdingCents Int @default(0) // extra per-period withholding
+  employmentType   EmploymentType @default(FULL_TIME)
+  payType          PayType        @default(SALARIED)
+  payRateCents     Int // hourly rate in cents, or annual salary in cents
+  weeklyHours      Int            @default(40)
+  departmentId     String?
+  department       Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  status           EmployeeStatus @default(ACTIVE)
+  hireDate         DateTime       @default(now())
+  terminationDate  DateTime?
+  // Deduction configuration (simulated)
+  preTax401kBps    Int            @default(0) // basis points of gross
+  healthInsuranceCents Int        @default(0) // flat amount per pay period
+  postTaxRothBps   Int            @default(0) // basis points of gross
+  garnishmentCents Int            @default(0) // flat amount per pay period
+  ptoBalanceDays   Int            @default(15)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  lineItems   PayrollLineItem[]
+  transfers   BankTransfer[]
+  expenses    Expense[]
+
+  @@index([companyId, status])
+  @@index([companyId, departmentId])
+}
+
+model Contractor {
+  id             String       @id @default(uuid())
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId         String?      @unique
+  user           User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name           String
+  businessName   String?
+  email          String?
+  paymentTerms   String       @default("Net 15")
+  rateCents      Int          @default(0)
+  rateUnit       String       @default("hourly") // hourly | fixed
+  status         String       @default("ACTIVE")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  invoices ContractorInvoice[]
+
+  @@index([companyId])
+}
+
+model Department {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String
+  budgetCents Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  employees  Employee[]
+  expenses   Expense[]
+
+  @@unique([companyId, name])
+}
+
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+model PayrollRun {
+  id              String           @id @default(uuid())
+  companyId       String
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payPeriodStart  DateTime
+  payPeriodEnd    DateTime
+  status          PayrollRunStatus @default(DRAFT)
+  runDate         DateTime?
+  createdById     String?
+  createdBy       User?            @relation("RunCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedById    String?
+  approvedBy      User?            @relation("RunApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  journalTxnId    String? // posted double-entry transaction for the run accrual
+  failureReason   String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  lineItems  PayrollLineItem[]
+  transfers  BankTransfer[]
+
+  @@index([companyId, status])
+  @@index([companyId, payPeriodEnd])
+}
+
+model PayrollLineItem {
+  id                 String      @id @default(uuid())
+  payrollRunId       String
+  payrollRun         PayrollRun  @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId         String
+  employee           Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  grossPay           Int
+  federalTax         Int
+  stateTax           Int
+  ficaSs             Int
+  ficaMedicare       Int
+  preTaxDeductions   Int         @default(0)
+  postTaxDeductions  Int         @default(0)
+  expenseReimbursement Int       @default(0)
+  netPay             Int
+  taxEngineSnapshot  Json? // what the engine returned — auditability
+  createdAt          DateTime    @default(now())
+
+  transfers BankTransfer[]
+
+  @@unique([payrollRunId, employeeId]) // idempotency: one line per employee per run
+  @@index([employeeId])
+}
+
+// ---------------------------------------------------------------------------
+// Contractors
+// ---------------------------------------------------------------------------
+
+model ContractorInvoice {
+  id           String        @id @default(uuid())
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contractorId String
+  contractor   Contractor    @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  amountCents  Int
+  description  String
+  status       InvoiceStatus @default(SUBMITTED)
+  periodStart  DateTime
+  periodEnd    DateTime
+  submittedAt  DateTime      @default(now())
+  approvedAt   DateTime?
+  approvedById String?
+  approvedBy   User?         @relation("InvoiceApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  rejectedAt   DateTime?
+  rejectionReason String?
+  paidAt       DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  transfers BankTransfer[]
+
+  @@index([companyId, status])
+  @@index([contractorId])
+}
+
+// ---------------------------------------------------------------------------
+// Double-entry ledger (the centerpiece)
+// ---------------------------------------------------------------------------
+
+model LedgerAccount {
+  id          String      @id @default(uuid())
+  companyId   String
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code        String // e.g. OPERATING_CASH
+  accountName String
+  accountType AccountType
+  normalSide  NormalSide
+  createdAt   DateTime    @default(now())
+
+  entries LedgerEntry[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model LedgerTransaction {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  date          DateTime @default(now())
+  description   String
+  referenceType String? // payroll_run | invoice | expense | transfer | reversal | opening | manual
+  referenceId   String?
+  reversalOfId  String? // set when this transaction reverses another
+  createdBy     String? // actor user id when applicable
+  createdAt     DateTime @default(now())
+
+  entries    LedgerEntry[]
+  reversals  LedgerTransaction[] @relation("TxnReversal")
+  reversedBy LedgerTransaction?  @relation("TxnReversal", fields: [reversalOfId], references: [id])
+
+  @@index([companyId, date])
+  @@index([referenceType, referenceId])
+}
+
+model LedgerEntry {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  accountId     String
+  account       LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transactionId String
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  debitAmount   Int      @default(0)
+  creditAmount  Int      @default(0)
+  relatedEntityType String?
+  relatedEntityId   String?
+  reversedEntryId   String? // set on a reversal entry: the original entry it reverses
+  createdAt     DateTime @default(now())
+
+  reversedEntry LedgerEntry?  @relation("EntryReversal", fields: [reversedEntryId], references: [id])
+  reversedBy    LedgerEntry[] @relation("EntryReversal")
+
+  @@index([companyId, accountId, createdAt])
+  @@index([companyId, createdAt])
+  @@index([transactionId])
+  @@index([relatedEntityType, relatedEntityId])
+}
+
+model CompanyBankAccount {
+  id                    String   @id @default(uuid())
+  companyId             String
+  company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  bankName              String
+  routingNumberEncrypted String // encrypted at rest even though data is fake
+  accountNumberEncrypted String
+  startingBalanceCents  Int      @default(0)
+  isDefault             Boolean  @default(true)
+  createdAt             DateTime @default(now())
+
+  @@index([companyId])
+}
+
+model BankTransfer {
+  id                 String         @id @default(uuid())
+  companyId          String
+  company            Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payrollRunId       String?
+  payrollRun         PayrollRun?    @relation(fields: [payrollRunId], references: [id], onDelete: SetNull)
+  payrollLineItemId  String?
+  payrollLineItem    PayrollLineItem? @relation(fields: [payrollLineItemId], references: [id], onDelete: SetNull)
+  invoiceId          String?
+  invoice            ContractorInvoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  employeeId         String?
+  employee           Employee?      @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  amountCents        Int
+  status             TransferStatus @default(INITIATED)
+  failureCode        String? // R01 NSF, R02 account closed, R03 no account
+  initiatedAt        DateTime?
+  settledAt          DateTime?
+  attempt            Int            @default(1)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([companyId, status])
+  @@index([payrollRunId])
+  @@index([invoiceId])
+}
+
+// ---------------------------------------------------------------------------
+// Expenses
+// ---------------------------------------------------------------------------
+
+model Expense {
+  id                String           @id @default(uuid())
+  companyId         String
+  company           Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  submittedById     String
+  submittedBy       User             @relation("ExpenseSubmittedBy", fields: [submittedById], references: [id])
+  employeeId        String?
+  employee          Employee?        @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  departmentId      String?
+  department        Department?      @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  amountCents       Int
+  category          String
+  description       String           @default("")
+  expenseDate       DateTime         @default(now())
+  status            ExpenseStatus    @default(SUBMITTED)
+  receiptPath       String?
+  rejectionReason   String?
+  reimbursementMode ReimbursementMode @default(DEFER_TO_PAYROLL)
+  approvedById      String?
+  approvedBy        User?            @relation("ExpenseApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt        DateTime?
+  reimbursedAt      DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([companyId, status])
+  @@index([submittedById])
+  @@index([departmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail (insert-only: no application update/delete path; DB triggers enforce)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  companyId   String?
+  company     Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail  String? // denormalized so the trail survives user deletion
+  action      String // e.g. payroll.run.approved
+  entityType  String
+  entityId    String
+  beforeState Json?
+  afterState  Json?
+  createdAt   DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId])
+}

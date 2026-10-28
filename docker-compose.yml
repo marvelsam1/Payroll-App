@@ -1,0 +1,64 @@
+name: payledger
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: payledger
+      POSTGRES_PASSWORD: payledger
+      POSTGRES_DB: payledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payledger -d payledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql://payledger:payledger@postgres:5432/payledger
+      REDIS_URL: redis://redis:6379
+      QUEUE_DRIVER: bullmq
+      JWT_SECRET: change-me-in-production-use-long-random-string
+      PORT: 3001
+      ACH_SETTLE_DELAY_MS: "8000"
+      WEB_ORIGIN: http://localhost:3000
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        API_PROXY_TARGET: http://api:3001
+    environment:
+      API_PROXY_TARGET: http://api:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
